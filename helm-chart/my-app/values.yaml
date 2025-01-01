@@ -1,0 +1,22 @@
+appName: my-app
+namespace: my-app
+replicaCount: 1
+image:
+  repository: 711387107942.dkr.ecr.ap-south-1.amazonaws.com/my-app
+  tag: v1
+  pullPolicy: IfNotPresent
+service:
+  name: my-app-service
+  type: LoadBalancer
+  ports:
+    - name: http
+      port: 80
+      targetPort: 5000
+      protocol: TCP
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 250m
+    memory: 256Mi
