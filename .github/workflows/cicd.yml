@@ -61,6 +61,12 @@ jobs:
           terraform plan -destroy -out=tfplan -var-file=terraform.tfvars
         fi
 
+    - name: Delete Helm Release
+      if: ${{ github.event.inputs.action == 'destroy' }}
+      run: |
+        helm uninstall my-app || echo "Helm release not found, skipping."
+        kubectl delete ns my-app-namespace || echo "Namespace not found, skipping."
+
     - name: Terraform Apply/Destroy
       working-directory: ./infra
       run: |
