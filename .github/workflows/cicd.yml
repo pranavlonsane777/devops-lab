@@ -35,9 +35,11 @@ jobs:
         aws-region: ${{ env.AWS_REGION }}
 
     - name: Log in to Amazon ECR
+      if: ${{ github.event.inputs.action == 'apply'}}
       run: aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
 
     - name: Build and Push Docker Image
+      if: ${{ github.event.inputs.action == 'apply' }}
       run: |
         docker build -t ${{ env.IMAGE_REPO_NAME }}:${{ env.IMAGE_TAG }} ./app
         docker tag ${{ env.IMAGE_REPO_NAME }}:${{ env.IMAGE_TAG }} ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.IMAGE_REPO_NAME }}:${{ env.IMAGE_TAG }}
@@ -61,11 +63,43 @@ jobs:
           terraform plan -destroy -out=tfplan -var-file=terraform.tfvars
         fi
 
+    - name: Check Kubernetes Connectivity
+      if: ${{ github.event.inputs.action == 'destroy' }}
+      run: |
+        kubectl cluster-info || echo "Cluster not reachable, skipping Helm uninstall."
+
     - name: Delete Helm Release
       if: ${{ github.event.inputs.action == 'destroy' }}
       run: |
         helm uninstall my-app || echo "Helm release not found, skipping."
         kubectl delete ns my-app-namespace || echo "Namespace not found, skipping."
+
+    - name: Wait for LoadBalancer Cleanup
+      if: ${{ github.event.inputs.action == 'destroy' }}
+      run: |
+        echo "Waiting for LoadBalancer deletion..."
+        sleep 60  # Allow some time for Kubernetes to clean up associated resources.
+
+    - name: Delete Orphaned Load Balancer
+      if: ${{ github.event.inputs.action == 'destroy' }}
+      run: |
+        LB_ARN=$(aws elb describe-load-balancers --query "LoadBalancerDescriptions[?contains(DNSName, 'my-app')].LoadBalancerName" --output text)
+        if [ -n "$LB_ARN" ]; then
+          aws elb delete-load-balancer --load-balancer-name "$LB_ARN"
+          echo "Deleted LoadBalancer: $LB_ARN"
+        else
+          echo "No LoadBalancer found, skipping."
+        fi
+  
+    - name: Delete Orphaned Security Groups
+      if: ${{ github.event.inputs.action == 'destroy' }}
+      run: |
+        echo "Looking for orphaned security groups..."
+        SG_IDS=$(aws ec2 describe-security-groups --filters "Name=group-name,Values=k8s-elb-*" --query "SecurityGroups[].GroupId" --output text)
+        for SG_ID in $SG_IDS; do
+          echo "Deleting security group: $SG_ID"
+          aws ec2 delete-security-group --group-id "$SG_ID" || echo "Failed to delete $SG_ID, it might still be in use."
+        done
 
     - name: Terraform Apply/Destroy
       working-directory: ./infra
