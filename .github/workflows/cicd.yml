@@ -1,0 +1,82 @@
+name: CI/CD Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Choose the Terraform action: apply or destroy"
+        required: true
+        default: "apply"
+        type: choice
+        options:
+          - apply
+          - destroy
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+
+    env:
+      AWS_REGION: ap-south-1
+      AWS_ACCOUNT_ID: 711387107942
+      IMAGE_REPO_NAME: my-app
+      IMAGE_TAG: v1
+      CLUSTER_NAME: eks_cluster
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Configure AWS CLI
+      uses: aws-actions/configure-aws-credentials@v3
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: $AWS_REGION
+
+    - name: Log in to Amazon ECR
+      run: aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+
+    - name: Build and Push Docker Image
+      run: |
+        docker build -t $IMAGE_REPO_NAME:$IMAGE_TAG ./app
+        docker tag $IMAGE_REPO_NAME:$IMAGE_TAG $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$IMAGE_REPO_NAME:$IMAGE_TAG
+        docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$IMAGE_REPO_NAME:$IMAGE_TAG
+
+    - name: Set up Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: 1.4.6
+
+    - name: Terraform Init
+      working-directory: ./infra
+      run: terraform init
+
+    - name: Terraform Plan
+      working-directory: ./infra
+      run: |
+        if [ "${{ github.event.inputs.action }}" == "apply" ]; then
+          terraform plan -out=tfplan -var-file=terraform.tfvars
+        elif [ "${{ github.event.inputs.action }}" == "destroy" ]; then
+          terraform plan -destroy -out=tfplan -var-file=terraform.tfvars
+        fi
+
+    - name: Terraform Apply/Destroy
+      working-directory: ./infra
+      run: |
+        if [ "${{ github.event.inputs.action }}" == "apply" ]; then
+          terraform apply -auto-approve tfplan
+        elif [ "${{ github.event.inputs.action }}" == "destroy" ]; then
+          terraform apply -destroy -auto-approve tfplan
+        fi
+
+    - name: Update kubeconfig
+      if: ${{ github.event.inputs.action == 'apply' }}
+      run: aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER_NAME
+
+    - name: Deploy using Helm
+      if: ${{ github.event.inputs.action == 'apply' }}
+      run: |
+        helm upgrade --install my-app ./helm-chart/my-app \
+          --set image.repository=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$IMAGE_REPO_NAME \
+          --set image.tag=$IMAGE_TAG
